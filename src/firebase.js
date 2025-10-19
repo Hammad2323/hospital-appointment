@@ -1,5 +1,4 @@
-// src/firebase.js
-import { initializeApp } from "firebase/app";
+import { initializeApp, getApps } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -11,5 +10,7 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-const app = initializeApp(firebaseConfig);
+// ⚡ Only initialize if no apps exist
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
+
 export const db = getFirestore(app);

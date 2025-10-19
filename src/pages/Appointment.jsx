@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from "react";
-import { db } from "../firebase";
 import {
   collection,
   addDoc,
@@ -7,166 +6,233 @@ import {
   query,
   where,
 } from "firebase/firestore";
+import { db } from "../firebase";
+import html2canvas from "html2canvas";
 
 export default function Appointment() {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [symptoms, setSymptoms] = useState("");
   const [date, setDate] = useState("");
-  const [time, setTime] = useState("");
-  const [availableSlots, setAvailableSlots] = useState([]);
-  const [successMsg, setSuccessMsg] = useState("");
+  const [selectedTime, setSelectedTime] = useState("");
+  const [slots, setSlots] = useState([]);
+  const [bookedSlots, setBookedSlots] = useState([]);
+  const [appointment, setAppointment] = useState(null);
+  const [message, setMessage] = useState("");
 
-  const appointmentsRef = collection(db, "appointments");
-
-  // === Generate time slots ===
-  const generateTimeSlots = (day) => {
-    let slots = [];
-    let startHour = 9;
-    let endHour = 14; // 2 PM
-
-    // Friday short hours (9 AM - 1 PM)
-    if (day === 5) endHour = 13;
-
-    const maxPatients = day === 5 ? 24 : 30;
-    const slotCount = (endHour - startHour) * 6; // 6 slots per hour (10 mins)
-    const total = Math.min(slotCount, maxPatients);
-
-    for (let i = 0; i < total; i++) {
-      const hour = Math.floor(i / 6) + startHour;
-      const minute = (i % 6) * 10;
-      const formattedTime = `${hour.toString().padStart(2, "0")}:${minute
-        .toString()
-        .padStart(2, "0")}`;
-      slots.push(formattedTime);
+  const generateSlots = (selectedDate) => {
+    const day = new Date(selectedDate).getDay();
+    if (day === 0) {
+      setMessage("❌ Sunday is closed. Please select another day.");
+      setSlots([]);
+      return;
     }
-    return slots;
+    let generatedSlots = [];
+    const startHour = 9;
+    const endHour = day === 5 ? 20 : 17;
+    for (let h = startHour; h <= endHour; h++) {
+      generatedSlots.push(`${h}:00`);
+      generatedSlots.push(`${h}:30`);
+    }
+    setMessage("");
+    setSlots(generatedSlots);
   };
 
-  // === When user picks a date ===
-  useEffect(() => {
-    if (!date) return;
-    const selected = new Date(date);
-    const day = selected.getDay();
-
-    if (day === 0) {
-      setAvailableSlots([]);
-      return;
+  const fetchBookedSlots = async (selectedDate) => {
+    if (!selectedDate) return;
+    try {
+      const q = query(collection(db, "appointments"), where("date", "==", selectedDate));
+      const querySnapshot = await getDocs(q);
+      const booked = querySnapshot.docs.map((doc) => doc.data().time);
+      setBookedSlots(booked);
+    } catch (err) {
+      console.error("Error fetching booked slots:", err);
     }
+  };
 
-    const slots = generateTimeSlots(day);
-
-    const fetchData = async () => {
-      const q = query(appointmentsRef, where("date", "==", date));
-      const snapshot = await getDocs(q);
-      const bookedTimes = snapshot.docs.map((doc) => doc.data().time);
-      const remaining = slots.filter((t) => !bookedTimes.includes(t));
-      setAvailableSlots(remaining);
-    };
-
-    fetchData();
+  useEffect(() => {
+    if (date) {
+      generateSlots(date);
+      fetchBookedSlots(date);
+    }
   }, [date]);
 
-  // === Submit Appointment ===
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!name || !phone || !date || !time) {
-      alert("Please fill all fields");
-      return;
-    }
-
-    const selectedDay = new Date(date).getDay();
-    if (selectedDay === 0) {
-      alert("Clinic is closed on Sunday.");
+  const handleConfirm = async () => {
+    if (!name || !phone || !date || !selectedTime) {
+      alert("⚠️ Please fill all required fields.");
       return;
     }
 
     try {
-      await addDoc(appointmentsRef, {
+      const q = query(
+        collection(db, "appointments"),
+        where("date", "==", date),
+        where("time", "==", selectedTime)
+      );
+      const existing = await getDocs(q);
+      if (!existing.empty) {
+        alert("⚠️ This time slot is already booked. Please select another one.");
+        fetchBookedSlots(date);
+        return;
+      }
+
+      const newAppointment = {
         name,
         phone,
+        symptoms,
         date,
-        time,
-        createdAt: new Date(),
-      });
-      setSuccessMsg("✅ Appointment booked successfully!");
-      setName("");
-      setPhone("");
-      setDate("");
-      setTime("");
-      setAvailableSlots([]);
-      setTimeout(() => setSuccessMsg(""), 4000);
-    } catch (err) {
-      console.error("Error booking appointment:", err);
-      alert("Something went wrong. Please try again.");
+        time: selectedTime,
+        createdAt: new Date().toISOString(),
+      };
+
+      await addDoc(collection(db, "appointments"), newAppointment);
+      localStorage.setItem("appointment", JSON.stringify(newAppointment));
+      setAppointment(newAppointment);
+
+      // === Send Email ===
+      try {
+        await fetch("http://localhost:5000/send-email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(newAppointment),
+        });
+      } catch (err) {
+        console.warn("⚠️ Email server not running (ignored).");
+      }
+
+      alert("✅ Appointment confirmed! Email sent to clinic.");
+      fetchBookedSlots(date);
+    } catch (error) {
+      console.error("Error:", error);
+      alert("❌ Something went wrong while booking appointment.");
     }
   };
 
+  useEffect(() => {
+    const saved = localStorage.getItem("appointment");
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      setAppointment(parsed);
+
+      const now = new Date();
+      const appTime = new Date(`${parsed.date} ${parsed.time}`);
+      if (appTime < now) {
+        setMessage("⚠️ Your appointment has passed. Please book a new one.");
+      }
+    }
+  }, []);
+
+  const handleDownload = async () => {
+    const element = document.getElementById("appointment-details");
+    const hiddenMessage = document.getElementById("download-message");
+    hiddenMessage.style.display = "block"; // show only during capture
+
+    const canvas = await html2canvas(element);
+    hiddenMessage.style.display = "none"; // hide it back
+
+    const link = document.createElement("a");
+    link.download = "appointment.jpg";
+    link.href = canvas.toDataURL("image/jpeg");
+    link.click();
+  };
+
   return (
-    <div className="flex justify-center items-center min-h-screen bg-blue-50 font-[Poppins]">
-      <div className="bg-white shadow-lg rounded-xl p-8 w-full max-w-md">
-        <h2 className="text-2xl font-bold text-blue-700 text-center mb-4">
-          Book Appointment
-        </h2>
+    <div className="max-w-md sm:max-w-lg mx-auto mt-8 sm:mt-12 bg-gradient-to-b from-green-50 to-white shadow-xl rounded-3xl p-5 sm:p-8 font-[Poppins] border border-green-200">
+      <h1 className="text-2xl sm:text-3xl font-semibold text-center text-green-700 mb-6">
+        Book Your Appointment
+      </h1>
 
-        {successMsg && (
-          <p className="text-green-600 text-center font-medium mb-4">
-            {successMsg}
-          </p>
-        )}
+      <div className="space-y-3">
+        <input
+          type="text"
+          placeholder="Full Name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="w-full p-3 border border-green-200 rounded-lg focus:border-green-500 focus:ring-2 focus:ring-green-100 outline-none text-sm sm:text-base"
+        />
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <input
-            type="text"
-            placeholder="Full Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
-          />
+        <input
+          type="tel"
+          placeholder="Contact Number"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          className="w-full p-3 border border-green-200 rounded-lg focus:border-green-500 focus:ring-2 focus:ring-green-100 outline-none text-sm sm:text-base"
+        />
 
-          <input
-            type="tel"
-            placeholder="Phone Number"
-            value={phone}
-            onChange={(e) => setPhone(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
-          />
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="w-full p-3 border border-green-200 rounded-lg focus:border-green-500 focus:ring-2 focus:ring-green-100 outline-none text-sm sm:text-base"
+        />
 
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
-          />
+        <input
+          type="text"
+          placeholder="Symptoms (optional)"
+          value={symptoms}
+          onChange={(e) => setSymptoms(e.target.value)}
+          className="w-full p-3 border border-green-200 rounded-lg focus:border-green-500 focus:ring-2 focus:ring-green-100 outline-none text-sm sm:text-base"
+        />
+      </div>
 
-          {availableSlots.length > 0 ? (
-            <select
-              value={time}
-              onChange={(e) => setTime(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
+      {message && <p className="text-center text-red-500 mt-3 text-sm sm:text-base">{message}</p>}
+
+      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mt-4">
+        {slots.map((slot) => {
+          const isBooked = bookedSlots.includes(slot);
+          return (
+            <button
+              key={slot}
+              onClick={() => !isBooked && setSelectedTime(slot)}
+              disabled={isBooked}
+              className={`p-2 text-xs sm:text-sm rounded-lg font-medium transition ${
+                isBooked
+                  ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+                  : selectedTime === slot
+                  ? "bg-green-600 text-white"
+                  : "bg-green-100 hover:bg-green-200 text-green-700"
+              }`}
             >
-              <option value="">Select Time</option>
-              {availableSlots.map((slot) => (
-                <option key={slot} value={slot}>
-                  {slot}
-                </option>
-              ))}
-            </select>
-          ) : date ? (
-            <p className="text-center text-red-500 text-sm">
-              {new Date(date).getDay() === 0
-                ? "Closed on Sunday"
-                : "No slots available for this date"}
-            </p>
-          ) : null}
+              {slot}
+            </button>
+          );
+        })}
+      </div>
+
+      <button
+        onClick={handleConfirm}
+        className="mt-6 w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-semibold shadow-md transition text-sm sm:text-base"
+      >
+        Confirm Appointment
+      </button>
+
+      {appointment && (
+        <div
+          id="appointment-details"
+          className="mt-6 bg-green-50 p-4 rounded-xl border border-green-200 shadow-inner text-sm sm:text-base relative"
+        >
+          <h2 className="text-lg sm:text-xl font-semibold text-green-700 mb-3">
+            Appointment Details
+          </h2>
+          <p><strong>Name:</strong> {appointment.name}</p>
+          <p><strong>Phone:</strong> {appointment.phone}</p>
+          <p><strong>Date:</strong> {appointment.date}</p>
+          <p><strong>Time:</strong> {appointment.time}</p>
+          <p><strong>Symptoms:</strong> {appointment.symptoms || "Not provided"}</p>
+
+          {/* Hidden message for download only */}
+          <div id="download-message" style={{ display: "none", marginTop: "10px", color: "#166534", fontWeight: 500 }}>
+            Please arrive 10 minutes earlier. Thank you!
+          </div>
 
           <button
-            type="submit"
-            className="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition"
+            onClick={handleDownload}
+            className="mt-4 bg-green-500 hover:bg-green-600 text-white py-2 px-4 rounded-lg transition text-sm sm:text-base"
           >
-            Confirm Appointment
+            Download as JPG
           </button>
-        </form>
-      </div>
+        </div>
+      )}
     </div>
   );
 }
